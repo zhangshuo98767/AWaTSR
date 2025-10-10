@@ -4,9 +4,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from haversine import haversine_vector, Unit
 
-# --------------------------------------------------------------------------- #
-# 1. LocalPerformerAttention with 2-layer Temporal Convolution
-# --------------------------------------------------------------------------- #
 class LocalPerformerAttention(nn.Module):
     def __init__(self, dim, heads=4, bias_heads=4, window_size=8, stride=None,
                  coordinates=None, device='cpu', sigma_init=6,
@@ -41,11 +38,6 @@ class LocalPerformerAttention(nn.Module):
         self.eps = 1e-6
 
     def forward(self, x, ws, wd):
-        """
-        x  : (B, L, N, C)
-        ws : (B, L, N)  wind speed (m/s)
-        wd : (B, L, N)  wind direction (deg, 0=N)
-        """
         B, L, N, C = x.shape
         device = x.device
         out = torch.zeros_like(x)
@@ -141,9 +133,6 @@ class LocalPerformerBlock(nn.Module):
         x = x + self.att(x, ws, wd)
         return x + self.ffn(x)
 
-# --------------------------------------------------------------------------- #
-# 2. Utility Layers (FCLayer / MLP)
-# --------------------------------------------------------------------------- #
 class Align(nn.Module):
     def __init__(self, c_in, c_out):
         super().__init__()
@@ -169,9 +158,7 @@ class MLP(nn.Module):
         x = F.relu(self.fc1(x.permute(0, 3, 1, 2)))
         return self.fc2(x).permute(0, 2, 3, 1)
 
-# --------------------------------------------------------------------------- #
-# 3. Adaptive-K Sparse MoE-TCN + Entropy Regularization
-# --------------------------------------------------------------------------- #
+
 class AdaptiveSparseMoETemporalDecoderTCN(nn.Module):
     def __init__(self,
                  hidden_dim: int,
@@ -261,9 +248,7 @@ class AdaptiveSparseMoETemporalDecoderTCN(nn.Module):
 
         return mixed.transpose(1, 2), ent_reg  # (B*N, T_out, C), scalar
 
-# --------------------------------------------------------------------------- #
-# 4. Temporal / Spatial Conv Layer
-# --------------------------------------------------------------------------- #
+
 class TemporalConvLayer(nn.Module):
     def __init__(self, kt, c_in, c_out, act="GLU"):
         super().__init__()
@@ -292,30 +277,8 @@ class SpatioConvLayer(nn.Module):
         xc = torch.einsum('knm,bclm->bclkn', Lk, x)
         xgc = torch.einsum('iok,bclkn->boln', self.theta, xc) + self.bias
         return F.relu(torch.sigmoid(self.alpha) * x + (1 - torch.sigmoid(self.alpha)) * xgc)
-    '''
-class SpatioConvLayer(nn.Module):
-    def __init__(self, ks, c_in, c_out):
-        super().__init__()
-        # Chebyshev θ 参数： [c_in, c_out, ks]
-        self.theta = nn.Parameter(torch.Tensor(c_in, c_out, ks))
-        # 通道偏置
-        self.bias  = nn.Parameter(torch.Tensor(1, c_out, 1, 1))
 
-        nn.init.kaiming_uniform_(self.theta, a=math.sqrt(5))
-        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.theta)
-        nn.init.uniform_(self.bias, -1 / math.sqrt(fan_in), 1 / math.sqrt(fan_in))
 
-    def forward(self, x, Lk):
-        # Chebyshev 多项式展开：K×N×N 乘 B×C×L×N → B×C×L×K×N
-        xc  = torch.einsum('knm, bclm -> bclkn', Lk, x)
-        # 图卷积 + 偏置：输出 B×C_out×L×N
-        xgc = torch.einsum('iok, bclkn -> boln', self.theta, xc) + self.bias
-        # 非线性
-        return F.relu(xgc)
-'''
-# --------------------------------------------------------------------------- #
-# 5. ASMSTCN (with Adaptive Sparse MoE Decoder)
-# --------------------------------------------------------------------------- #
 class ASMSTCN(nn.Module):
     def __init__(self, adj_matrix, num_nodes, input_length,
                  input_dim, hidden_dim, output_dim, output_length,
@@ -381,17 +344,7 @@ class ASMSTCN(nn.Module):
 
         return pred, h, dec, ent
 
-# --------------------------------------------------------------------------- #
-# 6. SpatialRegModule & ASMSTCN_Reg
-# --------------------------------------------------------------------------- #
 class SpatialRegModule(nn.Module):
-    """
-    空间正则（训练期损失，仅 L_lap ）：
-      - A_eff = (1-α)A + α A_dyn
-      - L_lap : 图拉普拉斯项（默认作用在预测 \hat y 的最终一步；
-               未提供 y_hat 时回退到对 dec_node 的拉普拉斯）
-    注：为兼容旧接口，n_proto 与 tau 参数被保留但不再使用。
-    """
     def __init__(self, c_in, n_proto, lap_weight,
                  adj_matrix, tau=0.1, tau_dyn=0.5,
                  alpha_init=0.1, device=None):
@@ -414,12 +367,6 @@ class SpatialRegModule(nn.Module):
         return (deg * Fb.pow(2).sum(1)).sum() - (Fb * (A @ Fb)).sum()
 
     def forward(self, h_node, dec_node, y_hat=None):
-        """
-        h_node : (B, N, C) —— 用于构造批次相似邻接 A_dyn
-        dec_node: (B, N, C) —— 仅在 y_hat=None 时用于拉普拉斯回退
-        y_hat   : (B, N) 或 (B, N, H) —— 预测输出；若提供则 L_lap 用最终一步
-        return  : 标量损失  λ_lap * L_lap
-        """
         B, N, C = h_node.shape
 
         # 1) A_eff = (1-α)A + α A_dyn
