@@ -4,6 +4,7 @@
 |-----------|-----------------------------------------------------------------------------|
 | `main.py` | Entry point. Sets up the training environment, loads modules, and starts training. |
 | `model.py`| Loads the model to predict on test data and computes errors vs. ground truth.     |
+| `Importdata.py`| Load data     |
 
 
 # Install requirements
