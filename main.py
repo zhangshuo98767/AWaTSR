@@ -7,13 +7,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from sklearn.metrics import mean_squared_error, mean_absolute_error
-
 from Importdata import LoadData
 from model import ASMSTCN_Reg
 
-# ------------------------------- #
-# 仅计算 MAE / RMSE / Corr
-# ------------------------------- #
 def compute_metrics(true_vals, pred_vals):
     mae  = mean_absolute_error(true_vals.reshape(-1), pred_vals.reshape(-1))
     rmse = math.sqrt(mean_squared_error(true_vals.reshape(-1), pred_vals.reshape(-1)))
@@ -26,9 +22,7 @@ def compute_metrics(true_vals, pred_vals):
         corr = 0.0
     return mae, rmse, corr
 
-# ------------------------------- #
-# 单轮训练（静默）
-# ------------------------------- #
+
 def train_epoch(data, model, criterion, optimizer,
                 batch_size, space_loss_weight, ent_loss_weight):
     model.train()
@@ -44,33 +38,30 @@ def train_epoch(data, model, criterion, optimizer,
         loss.backward()
         optimizer.step()
 
-# ------------------------------- #
-# 评估（val/test）
-# ------------------------------- #
-def evaluate(data, model, batch_size):
+@torch.no_grad()
+def evaluate_split(data, model, batch_size, which="valid"):
     model.eval()
     device = next(model.parameters()).device
+    if which == "valid":
+        X, Y = data.valid
+    elif which == "test":
+        X, Y = data.test
+    elif which == "train":
+        X, Y = data.train
+    else:
+        raise ValueError(f"Unknown split: {which}")
 
-    def _run(splitX, splitY):
-        preds, trues = [], []
-        with torch.no_grad():
-            for Xb, Yb in data.get_batches(splitX, splitY, batch_size, shuffle=False):
-                Xb, Yb = Xb.to(device), Yb.to(device)
-                out = model(Xb)
-                pred = out[0] if isinstance(out, tuple) else out
-                preds.append(pred.squeeze().cpu())
-                trues.append(Yb.squeeze().cpu())
-        preds = torch.cat(preds, 0).numpy()
-        trues = torch.cat(trues, 0).numpy()
-        return preds, trues
+    preds, trues = [], []
+    for Xb, Yb in data.get_batches(X, Y, batch_size, shuffle=False):
+        Xb, Yb = Xb.to(device), Yb.to(device)
+        out = model(Xb)
+        pred = out[0] if isinstance(out, tuple) else out
+        preds.append(pred.squeeze().cpu())
+        trues.append(Yb.squeeze().cpu())
+    preds = torch.cat(preds, 0).numpy()
+    trues = torch.cat(trues, 0).numpy()
+    return preds, trues
 
-    v_p, v_t = _run(data.valid[0], data.valid[1])
-    t_p, t_t = _run(data.test[0], data.test[1])
-    return v_p, v_t, t_p, t_t
-
-# ------------------------------- #
-# 训练主流程
-# ------------------------------- #
 def run_training(data,
                  input_seq_len, output_seq_len,
                  learning_rate, batch_size,
@@ -103,33 +94,36 @@ def run_training(data,
     criterion = nn.SmoothL1Loss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-3)
 
-    best_rmse = float('inf')
+    # —— 用验证集 MAE 选最佳与早停 ——
+    best_val_mae = float('inf')
     best_state = None
-    best_test_metrics = None
+    best_epoch = -1
     no_improve = 0
 
-    for _ in range(1, epochs + 1):
+    for epoch in range(1, epochs + 1):
         train_epoch(data, model, criterion, optimizer,
                     batch_size, space_loss_weight, ent_loss_weight)
 
-        # 以 Test RMSE 选择最优
-        _, _, t_p, t_t = evaluate(data, model, batch_size)
-        mae, rmse, corr = compute_metrics(t_t, t_p)
-
-        if rmse < best_rmse:
-            best_rmse = rmse
+        v_p, v_t = evaluate_split(data, model, batch_size, which="valid")
+        v_mae, v_rmse, v_corr = compute_metrics(v_t, v_p)
+        if v_mae < best_val_mae - 1e-8:
+            best_val_mae = v_mae
             best_state = copy.deepcopy(model.state_dict())
-            best_test_metrics = (mae, rmse, corr)
+            best_epoch = epoch
             no_improve = 0
         else:
             no_improve += 1
             if no_improve >= early_stop_patience:
                 break
 
+        print(f"Epoch {epoch:03d} | Val_MAE {v_mae:.4f} | Val_RMSE {v_rmse:.4f} | Val_Corr {v_corr:.4f}")
+
     if best_state is not None:
         model.load_state_dict(best_state)
-    mae, rmse, corr = best_test_metrics
-    print(f"Best Test | out={output_seq_len}h | MAE={mae:.4f} RMSE={rmse:.4f} Corr={corr:.4f}")
+
+    t_p, t_t = evaluate_split(data, model, batch_size, which="test")
+    mae, rmse, corr = compute_metrics(t_t, t_p)
+    print(f"Best@epoch {best_epoch} | out={output_seq_len}h | Test: MAE={mae:.4f} RMSE={rmse:.4f} Corr={corr:.4f}")
 
 def run_all_experiments():
     out_lens          = [24]
